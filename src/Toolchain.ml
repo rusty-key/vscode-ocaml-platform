@@ -15,7 +15,6 @@ let promptSetup ~f =
        | Some _ -> P.resolve (Error "Please setup the toolchain"))
 
 let setupWithProgressIndicator esyCmd ~envWithUnzip:esyEnv folder =
-  let open Setup.Bsb in
   Window.withProgress
     [%bs.obj
       { location = Window.locationToJs Window.Notification
@@ -23,15 +22,16 @@ let setupWithProgressIndicator esyCmd ~envWithUnzip:esyEnv folder =
       }]
     (fun progress ->
       let succeeded = ref (Ok ()) in
-      let eventEmitter = make () in
-      onProgress eventEmitter (fun percent ->
+      let eventEmitter = Setup.Bsb.make () in
+      Setup.Bsb.onProgress eventEmitter (fun percent ->
           Js.log2 "Percentage:" percent;
           (progress.report
              [%bs.obj { increment = int_of_float (percent *. 100.) }] [@bs]));
-      onEnd eventEmitter (fun () ->
+      Setup.Bsb.onEnd eventEmitter (fun () ->
           (progress.report [%bs.obj { increment = 100 }] [@bs]));
-      onError eventEmitter (fun errorMsg -> succeeded := Error errorMsg);
-      run esyCmd esyEnv eventEmitter folder
+      Setup.Bsb.onError eventEmitter (fun errorMsg ->
+          succeeded := Error errorMsg);
+      Setup.Bsb.run esyCmd esyEnv eventEmitter folder
       |> P.then_ (fun () -> P.resolve !succeeded))
 
 module Binaries = struct
@@ -204,8 +204,7 @@ end = struct
                  | None -> R.return false
                  | Some json ->
                    json
-                   |> (let open Json.Decode in
-                      field "isProjectReadyForDev" bool)
+                   |> Json.Decode.field "isProjectReadyForDev" Json.Decode.bool
                    |> R.return )
              in
              P.resolve r)
