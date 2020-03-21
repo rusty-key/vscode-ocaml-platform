@@ -57,7 +57,7 @@ module PackageManager : sig
     -> root:Fpath.t
     -> (spec, string) result P.t
 
-  val makeSpec : env:string Js.Dict.t -> kind:t -> (spec, string) result P.t
+  val specOfKind : env:string Js.Dict.t -> kind:t -> (spec, string) result P.t
 
   val setupToolChain : Fpath.t -> spec -> (unit, string) result P.t
 
@@ -90,23 +90,10 @@ end = struct
 
   let opam root = Opam root
 
-  let makeSpec ~env ~kind =
-    match kind with
-    | Opam root ->
-      Cmd.make ~cmd:"opam" ~env
-      |> P.then_ (function
-           | Error msg -> P.resolve (Error msg)
-           | Ok cmd -> Ok { cmd; kind = Opam root } |> P.resolve)
-    | Esy root ->
-      Cmd.make ~cmd:"esy" ~env
-      |> P.then_ (function
-           | Error msg -> P.resolve (Error msg)
-           | Ok cmd -> Ok { cmd; kind = Esy root } |> P.resolve)
-    | Global ->
-      Cmd.make ~env ~cmd:"bash"
-      |> P.then_ (function
-           | Ok cmd -> Ok { cmd; kind = Global } |> P.resolve
-           | Error msg -> Error msg |> P.resolve)
+  let toCmd = function
+    | Opam _ -> "opam"
+    | Esy _ -> "esy"
+    | Global -> "bash"
 
   let toName = function
     | Opam _ -> Binaries.opam
@@ -124,10 +111,16 @@ end = struct
     | Opam root -> Printf.sprintf "opam(%s)" (Fpath.toString root)
     | Global -> "global"
 
+  let specOfKind ~env ~kind =
+    Cmd.make ~env ~cmd:(toCmd kind)
+    |> P.then_ (function
+         | Error msg -> P.resolve (Error msg)
+         | Ok cmd -> P.resolve (Ok { cmd; kind }))
+
   let specOfName ~env ~name ~root =
     match name with
-    | x when x = Binaries.opam -> makeSpec ~env ~kind:(opam root)
-    | x when x = Binaries.esy -> makeSpec ~env ~kind:(esy root)
+    | x when x = Binaries.opam -> specOfKind ~env ~kind:(opam root)
+    | x when x = Binaries.esy -> specOfKind ~env ~kind:(esy root)
     | x -> "Invalid package manager name: " ^ x |> R.fail |> P.resolve
 
   let available ~env ~root =
@@ -425,7 +418,7 @@ let packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices =
            (* Workspace *)
            |> P.then_ (fun _ ->
                   match PackageManager.find packageManager multipleChoices with
-                  | Some pm -> PackageManager.makeSpec ~env ~kind:pm
+                  | Some pm -> PackageManager.specOfKind ~env ~kind:pm
                   | None ->
                     P.resolve
                       (Error
@@ -460,12 +453,12 @@ let init ~env ~folder =
          | [] -> (
            Js.Console.info "Will lookup toolchain from global env";
            match PackageManager.ofName projectRoot "<global>" with
-           | Ok kind -> PackageManager.makeSpec ~env ~kind
+           | Ok kind -> PackageManager.specOfKind ~env ~kind
            | Error msg -> Error msg |> P.resolve )
          | [ obviousChoice ] ->
            Js.Console.info2 "Toolchain detected"
              (PackageManager.toString obviousChoice);
-           PackageManager.makeSpec ~env ~kind:obviousChoice
+           PackageManager.specOfKind ~env ~kind:obviousChoice
          | multipleChoices ->
            packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices)
   |> okThen (fun spec -> Ok { spec; projectRoot })
