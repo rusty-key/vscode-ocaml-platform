@@ -57,7 +57,7 @@ module PackageManager : sig
     -> root:Fpath.t
     -> (spec, string) result P.t
 
-  val specOfKind : env:string Js.Dict.t -> kind:t -> (spec, string) result P.t
+  val toSpec : env:string Js.Dict.t -> kind:t -> (spec, string) result P.t
 
   val setupToolChain : Fpath.t -> spec -> (unit, string) result P.t
 
@@ -90,11 +90,6 @@ end = struct
 
   let opam root = Opam root
 
-  let toCmd = function
-    | Opam _ -> "opam"
-    | Esy _ -> "esy"
-    | Global -> "bash"
-
   let toName = function
     | Opam _ -> Binaries.opam
     | Esy _ -> Binaries.esy
@@ -111,16 +106,22 @@ end = struct
     | Opam root -> Printf.sprintf "opam(%s)" (Fpath.toString root)
     | Global -> "global"
 
-  let specOfKind ~env ~kind =
-    Cmd.make ~env ~cmd:(toCmd kind)
+  let toCmdString = function
+    | Opam _ -> "opam"
+    | Esy _ -> "esy"
+    | Global -> "bash"
+
+  let toSpec ~env ~kind =
+    Cmd.make ~env ~cmd:(toCmdString kind)
     |> P.then_ (function
          | Error msg -> P.resolve (Error msg)
          | Ok cmd -> P.resolve (Ok { cmd; kind }))
 
+  (* TODO: probably not part of the module *)
   let specOfName ~env ~name ~root =
     match name with
-    | x when x = Binaries.opam -> specOfKind ~env ~kind:(opam root)
-    | x when x = Binaries.esy -> specOfKind ~env ~kind:(esy root)
+    | x when x = Binaries.opam -> toSpec ~env ~kind:(opam root)
+    | x when x = Binaries.esy -> toSpec ~env ~kind:(esy root)
     | x -> "Invalid package manager name: " ^ x |> R.fail |> P.resolve
 
   let available ~env ~root =
@@ -136,10 +137,15 @@ end = struct
                 | Error _ -> (pm, false) |> P.resolve))
     |> Array.of_list |> P.all
     |> P.then_ (fun r ->
-           Js.Array.filter (fun (_pm, available) -> available) r
-           |> Array.map (fun (pm, _used) -> pm)
-           |> Array.to_list |> R.return |> P.resolve)
+           r |> Belt.List.fromArray
+           |. Belt.List.keepMap (fun (pm, available) ->
+                  if available then
+                    Some pm
+                  else
+                    None)
+           |> R.return |> P.resolve)
 
+  (* TODO: not part of PM? *)
   let env spec =
     let { cmd; kind } = spec in
     match kind with
@@ -253,14 +259,7 @@ end = struct
     | x :: xs -> (
       match x with
       | Global -> None
-      | Esy root -> (
-        match ofName root name with
-        | Ok y ->
-          if compare x y = 0 then
-            Some x
-          else
-            find name xs
-        | Error _ -> None )
+      | Esy root
       | Opam root -> (
         match ofName root name with
         | Ok y ->
@@ -418,7 +417,7 @@ let packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices =
            (* Workspace *)
            |> P.then_ (fun _ ->
                   match PackageManager.find packageManager multipleChoices with
-                  | Some pm -> PackageManager.specOfKind ~env ~kind:pm
+                  | Some pm -> PackageManager.toSpec ~env ~kind:pm
                   | None ->
                     P.resolve
                       (Error
@@ -453,12 +452,12 @@ let init ~env ~folder =
          | [] -> (
            Js.Console.info "Will lookup toolchain from global env";
            match PackageManager.ofName projectRoot "<global>" with
-           | Ok kind -> PackageManager.specOfKind ~env ~kind
+           | Ok kind -> PackageManager.toSpec ~env ~kind
            | Error msg -> Error msg |> P.resolve )
          | [ obviousChoice ] ->
            Js.Console.info2 "Toolchain detected"
              (PackageManager.toString obviousChoice);
-           PackageManager.specOfKind ~env ~kind:obviousChoice
+           PackageManager.toSpec ~env ~kind:obviousChoice
          | multipleChoices ->
            packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices)
   |> okThen (fun spec -> Ok { spec; projectRoot })
