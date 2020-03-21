@@ -254,8 +254,8 @@ module LanguageClient = struct
     }
 
   type t =
-    { start : (unit -> unit[@bs])
-    ; stop : (unit -> unit[@bs])
+    { start : unit -> unit
+    ; stop : unit -> unit
     }
 
   external make :

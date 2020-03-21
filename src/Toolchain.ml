@@ -1,3 +1,5 @@
+(** Takes care of setting up toolchain *)
+
 open Bindings
 open Utils
 module R = Result
@@ -5,14 +7,15 @@ module P = Js.Promise
 
 type commandAndArgs = string * string array
 
-let promptSetup ~f =
+let promptEsySetup ~f =
   Window.showQuickPick [| "yes"; "no" |]
     (Window.QuickPickOptions.make ~canPickMany:false
        ~placeHolder:{j|Setup this project's toolchain with 'esy'?|j} ())
   |> P.then_ (function
-       | None -> P.resolve (Error "Please setup the toolchain")
        | Some choice when choice = "yes" -> f ()
-       | Some _ -> P.resolve (Error "Please setup the toolchain"))
+       | Some _
+       | None ->
+         P.resolve (Error "Please setup the toolchain"))
 
 let setupWithProgressIndicator esyCmd ~envWithUnzip:esyEnv folder =
   Window.withProgress
@@ -214,7 +217,7 @@ end = struct
                () |> R.return |> P.resolve
              else if Fpath.compare root workspaceRoot = 0 then (
                Js.log "esy project";
-               promptSetup ~f:(fun () ->
+               promptEsySetup ~f:(fun () ->
                    Window.withProgress
                      [%bs.obj
                        { location = Window.locationToJs Window.Notification
@@ -452,14 +455,14 @@ let init ~env ~folder =
            packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices)
   |> okThen (fun spec -> Ok { spec; projectRoot })
 
-let setup { spec; projectRoot } =
+let setup' { spec; projectRoot } =
   PackageManager.setupToolChain projectRoot spec
   |> P.then_ (function
        | Error msg -> Error msg |> P.resolve
        | Ok () -> PackageManager.env spec)
   |> P.then_ (function
-       | Ok env -> Cmd.make ~cmd:"ocamllsp" ~env
-       | Error e -> e |> R.fail |> P.resolve)
+       | Error e -> e |> R.fail |> P.resolve
+       | Ok env -> Cmd.make ~cmd:"ocamllsp" ~env)
   |> P.then_ (fun r ->
          let r =
            match r with
@@ -467,5 +470,11 @@ let setup { spec; projectRoot } =
            | Error msg -> Error {j| Toolchain initialisation failed: $msg |j}
          in
          P.resolve r)
+
+let setup ~env ~folder =
+  init ~env ~folder
+  |> P.then_ (function
+       | Error msg -> P.resolve (Error msg)
+       | Ok toolchain -> setup' toolchain)
 
 let lsp (t : t) = PackageManager.lsp t.spec

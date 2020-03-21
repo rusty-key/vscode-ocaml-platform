@@ -1,8 +1,9 @@
 open Bindings
+module P = Js.Promise
 
 let handleError f =
-  Js.Promise.then_ (function
-    | Ok () -> Js.Promise.resolve ()
+  P.then_ (function
+    | Ok () -> P.resolve ()
     | Error msg -> f msg)
 
 module Client = struct
@@ -23,22 +24,18 @@ end
 let activate _context =
   Js.Dict.set Process.env "OCAMLRUNPARAM" "b";
   Js.Dict.set Process.env "OCAML_LSP_SERVER_LOG" "-";
-  let folder = Workspace.rootPath in
-  Toolchain.init ~env:Process.env ~folder
-  |> Js.Promise.then_ (function
-       | Ok toolchain -> Toolchain.setup toolchain
-       | Error msg -> Error msg |> Js.Promise.resolve)
-  |> Js.Promise.then_ (function
-       | Error msg -> Error msg |> Js.Promise.resolve
+  Toolchain.setup ~env:Process.env ~folder:Workspace.rootPath
+  |> P.then_ (function
+       | Error msg -> P.resolve (Error msg)
        | Ok toolchain ->
          let serverOptions = Server.make toolchain in
          let client =
            LanguageClient.make ~id:"ocaml" ~name:"OCaml Language Server"
              ~serverOptions ~clientOptions:(Client.make ())
          in
-         (client.start () [@bs]);
-         Js.Promise.resolve (Ok ()))
+         client.start ();
+         P.resolve (Ok ()))
   |> handleError Window.showErrorMessage
-  |> Js.Promise.catch (fun e ->
+  |> P.catch (fun e ->
          let message = Bindings.JsError.ofPromiseError e in
          Window.showErrorMessage {j|Error: $message|j})
