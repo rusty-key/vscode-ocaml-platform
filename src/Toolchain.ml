@@ -1,5 +1,3 @@
-(** Takes care of setting up toolchain *)
-
 open Bindings
 open Utils
 module R = Result
@@ -44,54 +42,70 @@ module Binaries = struct
 end
 
 module PackageManager : sig
+  type kind
+
   type t
 
-  type spec
+  module Set : sig
+    include Set.S with type elt = kind
+  end
 
-  val ofName : Fpath.t -> string -> (t, string) result
+  val ofName : Fpath.t -> string -> (kind, string) result
 
-  val toName : t -> string
+  val toName : kind -> string
 
-  val toString : t -> string
+  val toString : kind -> string
 
   val specOfName :
        env:string Js.Dict.t
     -> name:string
     -> root:Fpath.t
-    -> (spec, string) result P.t
+    -> (t, string) result P.t
 
-  val toSpec : env:string Js.Dict.t -> kind:t -> (spec, string) result P.t
+  val toSpec : env:string Js.Dict.t -> kind:kind -> (t, string) result P.t
 
-  val setupToolChain : Fpath.t -> spec -> (unit, string) result P.t
+  val setupToolChain : Fpath.t -> t -> (unit, string) result P.t
 
   val available :
-    env:string Js.Dict.t -> root:Fpath.t -> (t list, string) result P.t
+    env:string Js.Dict.t -> root:Fpath.t -> (kind list, string) result P.t
 
-  val env : spec -> (string Js.Dict.t, string) result P.t
+  val env : t -> (string Js.Dict.t, string) result P.t
 
-  val lsp : spec -> commandAndArgs
+  val lsp : t -> commandAndArgs
 
-  val compare : t -> t -> int
+  val find : string -> kind list -> kind option
 
-  val find : string -> t list -> t option
+  val makeEsy : Fpath.t -> kind
 
-  val esy : Fpath.t -> t
-
-  val opam : Fpath.t -> t
+  val makeOpam : Fpath.t -> kind
 end = struct
-  type t =
+  type kind =
     | Opam of Fpath.t
     | Esy of Fpath.t
     | Global
 
-  type spec =
+  type t =
     { cmd : Cmd.t
-    ; kind : t
+    ; kind : kind
     }
 
-  let esy root = Esy root
+  module Set = Set.Make (struct
+    type t = kind
 
-  let opam root = Opam root
+    let compare x y =
+      match (x, y) with
+      | Esy root1, Esy root2 -> Fpath.compare root1 root2
+      | Opam root1, Opam root2 -> Fpath.compare root1 root2
+      | Global, Global -> 0
+      | Esy _, Opam _ -> 1
+      | Esy _, Global -> -1
+      | Opam _, _ -> -1
+      | Global, _ -> 1
+  end)
+
+  let makeEsy root = Esy root
+
+  let makeOpam root = Opam root
 
   let toName = function
     | Opam _ -> Binaries.opam
@@ -123,8 +137,8 @@ end = struct
   (* TODO: probably not part of the module *)
   let specOfName ~env ~name ~root =
     match name with
-    | x when x = Binaries.opam -> toSpec ~env ~kind:(opam root)
-    | x when x = Binaries.esy -> toSpec ~env ~kind:(esy root)
+    | x when x = Binaries.opam -> toSpec ~env ~kind:(makeOpam root)
+    | x when x = Binaries.esy -> toSpec ~env ~kind:(makeEsy root)
     | x -> "Invalid package manager name: " ^ x |> R.fail |> P.resolve
 
   let available ~env ~root =
@@ -132,7 +146,7 @@ end = struct
       [ Esy root; Esy Fpath.(root / ".vscode" / "esy"); Opam root ]
     in
     supportedPackageManagers
-    |> List.map (fun (pm : t) ->
+    |> List.map (fun (pm : kind) ->
            let name = toName pm in
            Cmd.make ~env ~cmd:name
            |> P.then_ (function
@@ -246,17 +260,6 @@ end = struct
     | Esy root -> (Cmd.binPath cmd, [| "-P"; Fpath.toString root; "ocamllsp" |])
     | Global -> ("ocamllsp", [||])
 
-  let compare x y =
-    match (x, y) with
-    | Esy root1, Esy root2 -> Fpath.compare root1 root2
-    | Opam root1, Opam root2 -> Fpath.compare root1 root2
-    | Global, Global -> 0
-    | Opam _, Esy _ -> -1
-    | Esy _, Opam _ -> 1
-    | Esy _, Global -> -1
-    | Opam _, Global -> -1
-    | Global, _ -> 1
-
   let rec find name = function
     | [] -> None
     | x :: xs -> (
@@ -273,16 +276,11 @@ end = struct
         | Error _ -> None ) )
 end
 
-module PackageManagerSet : sig
-  include Set.S with type elt = PackageManager.t
-end =
-  Set.Make (PackageManager)
-
 module Manifest : sig
-  val lookup : Fpath.t -> (PackageManager.t list, string) result P.t
+  val lookup : Fpath.t -> (PackageManager.kind list, string) result P.t
 end = struct
   let parse projectRoot = function
-    | "esy.json" -> Some (PackageManager.esy projectRoot) |> P.resolve
+    | "esy.json" -> Some (PackageManager.makeEsy projectRoot) |> P.resolve
     | "opam" ->
       Fs.stat (Fpath.(projectRoot / "opam") |> Fpath.toString)
       |> P.then_ (fun r ->
@@ -292,7 +290,7 @@ end = struct
                | Ok stats -> (
                  match Fs.Stat.isDirectory stats with
                  | true -> None
-                 | false -> Some (PackageManager.opam projectRoot) )
+                 | false -> Some (PackageManager.makeOpam projectRoot) )
              in
              P.resolve r)
     | "package.json" ->
@@ -307,10 +305,10 @@ end = struct
                  || Utils.propertyExists json "devDependencies"
                then
                  if Utils.propertyExists json "esy" then
-                   Some (PackageManager.esy projectRoot) |> P.resolve
+                   Some (PackageManager.makeEsy projectRoot) |> P.resolve
                  else
                    Some
-                     (PackageManager.esy
+                     (PackageManager.makeEsy
                         Fpath.(projectRoot / ".vscode" / "esy"))
                    |> P.resolve
                else
@@ -327,7 +325,7 @@ end = struct
                    Utils.propertyExists json "dependencies"
                    || Utils.propertyExists json "devDependencies"
                  then
-                   Some (PackageManager.esy projectRoot) |> P.resolve
+                   Some (PackageManager.makeEsy projectRoot) |> P.resolve
                  else
                    None |> P.resolve
                | None ->
@@ -338,7 +336,7 @@ end = struct
         Fs.readFile manifestFile
         |> P.then_ (function
              | "" -> None |> P.resolve
-             | _ -> Some (PackageManager.opam projectRoot) |> P.resolve)
+             | _ -> Some (PackageManager.makeOpam projectRoot) |> P.resolve)
       | _ -> None |> P.resolve )
 
   let lookup projectRoot =
@@ -363,12 +361,7 @@ end = struct
 end
 
 type t =
-  { spec : PackageManager.spec
-  ; projectRoot : Fpath.t
-  }
-
-type resources =
-  { spec : PackageManager.spec
+  { spec : PackageManager.t
   ; projectRoot : Fpath.t
   }
 
@@ -377,12 +370,12 @@ let packageManagerSetOfPackageManagerList ~debugMsg lst =
   match lst with
   | Ok lst ->
     List.iter (fun x -> x |> PackageManager.toString |> Js.Console.info) lst;
-    lst |> PackageManagerSet.of_list
+    lst |> PackageManager.Set.of_list
   | Error msg ->
     Js.Console.error2
       (Printf.sprintf "Error during extracting %s", debugMsg)
       msg;
-    PackageManagerSet.empty
+    PackageManager.Set.empty
 
 let packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices =
   let config = Vscode.Workspace.getConfiguration "ocaml" in
@@ -438,9 +431,9 @@ let init ~env ~folder =
              alreadyUsedPackageManagers
          in
          match
-           PackageManagerSet.inter availablePackageManagers
+           PackageManager.Set.inter availablePackageManagers
              alreadyUsedPackageManagers
-           |> PackageManagerSet.elements
+           |> PackageManager.Set.elements
          with
          | [] -> (
            Js.Console.info "Will lookup toolchain from global env";
@@ -455,7 +448,7 @@ let init ~env ~folder =
            packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices)
   |> okThen (fun spec -> Ok { spec; projectRoot })
 
-let setup' { spec; projectRoot } =
+let setupWithResources { spec; projectRoot } =
   PackageManager.setupToolChain projectRoot spec
   |> P.then_ (function
        | Error msg -> Error msg |> P.resolve
@@ -475,6 +468,6 @@ let setup ~env ~folder =
   init ~env ~folder
   |> P.then_ (function
        | Error msg -> P.resolve (Error msg)
-       | Ok toolchain -> setup' toolchain)
+       | Ok toolchain -> setupWithResources toolchain)
 
 let lsp (t : t) = PackageManager.lsp t.spec
