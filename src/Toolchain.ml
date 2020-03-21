@@ -284,7 +284,7 @@ end =
   Set.Make (PackageManager)
 
 module Manifest : sig
-  val lookup : Fpath.t -> (PackageManagerSet.t, string) result P.t
+  val lookup : Fpath.t -> (PackageManager.t list, string) result P.t
 end = struct
   let parse projectRoot = function
     | "esy.json" -> Some (PackageManager.esy projectRoot) |> P.resolve
@@ -373,7 +373,7 @@ end = struct
                             | Some x -> Array.of_list [ x ]
                             | None -> [||] ))
                         [||] l
-                    |> Array.to_list |> PackageManagerSet.of_list )
+                    |> Array.to_list )
                   |> P.resolve))
 end
 
@@ -387,90 +387,87 @@ type resources =
   ; projectRoot : Fpath.t
   }
 
+let packageManagerSetOfPackageManagerList ~debugMsg lst =
+  Js.Console.info debugMsg;
+  match lst with
+  | Ok lst ->
+    List.iter (fun x -> x |> PackageManager.toString |> Js.Console.info) lst;
+    lst |> PackageManagerSet.of_list
+  | Error msg ->
+    Js.Console.error2
+      (Printf.sprintf "Error during extracting %s", debugMsg)
+      msg;
+    PackageManagerSet.empty
+
+let packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices =
+  let config = Vscode.Workspace.getConfiguration "ocaml" in
+  match
+    ( config |. Vscode.WorkspaceConfiguration.get "packageManager"
+    , config |. Vscode.WorkspaceConfiguration.get "toolChainRoot" )
+  with
+  | Some name, Some root ->
+    PackageManager.specOfName ~env ~name ~root:(Fpath.ofString root)
+  | Some name, None -> PackageManager.specOfName ~env ~name ~root:projectRoot
+  | _ ->
+    Window.showQuickPick
+      ( multipleChoices
+      |> List.map (fun pm -> PackageManager.toName pm)
+      |> Array.of_list )
+      (Window.QuickPickOptions.make ~canPickMany:false
+         ~placeHolder:
+           "Which package manager would you like to manage the toolchain?" ())
+    |> P.then_ (function
+         | None -> P.resolve (Error "showQuickPick() returned undefined")
+         | Some packageManager ->
+           let open Vscode.WorkspaceConfiguration in
+           update config "packageManager" packageManager
+             (configurationTargetToJs Workspace)
+           (* Workspace *)
+           |> P.then_ (fun _ ->
+                  match PackageManager.find packageManager multipleChoices with
+                  | Some pm -> PackageManager.makeSpec ~env ~kind:pm
+                  | None ->
+                    P.resolve
+                      (Error
+                         "Weird invalid state: selected choice was not found \
+                          in the list")))
+
 let init ~env ~folder =
   let projectRoot = Fpath.ofString folder in
   P.all2
     ( PackageManager.available ~root:projectRoot ~env
     , Manifest.lookup projectRoot
       |> okThen (fun pms ->
-             if pms = PackageManagerSet.empty then
+             if pms = [] then
                Error "TODO: global toolchain"
              else
                Ok pms) )
   |> P.then_ (fun (availablePackageManagers, alreadyUsedPackageManagers) ->
          let availablePackageManagers =
-           match availablePackageManagers with
-           | Ok x -> x |> PackageManagerSet.of_list
-           | Error msg ->
-             Js.log2 "Error during availablePackageManagers()" msg;
-             PackageManagerSet.empty
+           packageManagerSetOfPackageManagerList
+             ~debugMsg:"available package managers" availablePackageManagers
          in
          let alreadyUsedPackageManagers =
-           match alreadyUsedPackageManagers with
-           | Ok x -> x
-           | Error msg ->
-             Js.log2 "Error during alreadyUsedPackageManagers()" msg;
-             PackageManagerSet.empty
+           packageManagerSetOfPackageManagerList
+             ~debugMsg:"possibly used package managers"
+             alreadyUsedPackageManagers
          in
-         Js.log "availablePackageManagers";
-         PackageManagerSet.iter
-           (fun x -> x |> PackageManager.toString |> Js.log)
-           availablePackageManagers;
-         Js.log "possiblyUsed";
-         PackageManagerSet.iter
-           (fun x -> x |> PackageManager.toString |> Js.log)
-           alreadyUsedPackageManagers;
          match
            PackageManagerSet.inter availablePackageManagers
              alreadyUsedPackageManagers
            |> PackageManagerSet.elements
          with
          | [] -> (
-           Js.log "Will lookup toolchain from global env";
+           Js.Console.info "Will lookup toolchain from global env";
            match PackageManager.ofName projectRoot "<global>" with
            | Ok kind -> PackageManager.makeSpec ~env ~kind
            | Error msg -> Error msg |> P.resolve )
          | [ obviousChoice ] ->
-           Js.log2 "Toolchain detected" (PackageManager.toString obviousChoice);
+           Js.Console.info2 "Toolchain detected"
+             (PackageManager.toString obviousChoice);
            PackageManager.makeSpec ~env ~kind:obviousChoice
-         | multipleChoices -> (
-           let config = Vscode.Workspace.getConfiguration "ocaml" in
-           match
-             ( config |. Vscode.WorkspaceConfiguration.get "packageManager"
-             , config |. Vscode.WorkspaceConfiguration.get "toolChainRoot" )
-           with
-           | Some name, Some root ->
-             PackageManager.specOfName ~env ~name ~root:(Fpath.ofString root)
-           | Some name, None ->
-             PackageManager.specOfName ~env ~name ~root:projectRoot
-           | _ ->
-             Window.showQuickPick
-               ( multipleChoices
-               |> List.map (fun pm -> PackageManager.toName pm)
-               |> Array.of_list )
-               (Window.QuickPickOptions.make ~canPickMany:false
-                  ~placeHolder:
-                    "Which package manager would you like to manage the \
-                     toolchain?"
-                  ())
-             |> P.then_ (function
-                  | None ->
-                    P.resolve (Error "showQuickPick() returned undefined")
-                  | Some packageManager ->
-                    let open Vscode.WorkspaceConfiguration in
-                    update config "packageManager" packageManager
-                      (configurationTargetToJs Workspace)
-                    (* Workspace *)
-                    |> P.then_ (fun _ ->
-                           match
-                             PackageManager.find packageManager multipleChoices
-                           with
-                           | Some pm -> PackageManager.makeSpec ~env ~kind:pm
-                           | None ->
-                             P.resolve
-                               (Error
-                                  "Weird invalid state: selected choice was \
-                                   not found in the list"))) ))
+         | multipleChoices ->
+           packageManagerOfMultipleChoices ~env ~projectRoot multipleChoices)
   |> okThen (fun spec -> Ok { spec; projectRoot })
 
 let setup { spec; projectRoot } =
