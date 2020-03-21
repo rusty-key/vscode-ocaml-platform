@@ -281,9 +281,7 @@ end = struct
   let parse projectRoot = function
     | "esy.json" -> Some (PackageManager.esy projectRoot) |> P.resolve
     | "opam" ->
-      Fs.stat
-        (let open Fpath in
-        projectRoot / "opam" |> toString)
+      Fs.stat (Fpath.(projectRoot / "opam") |> Fpath.toString)
       |> P.then_ (fun r ->
              let r =
                match r with
@@ -295,11 +293,7 @@ end = struct
              in
              P.resolve r)
     | "package.json" ->
-      let manifestFile =
-        (let open Fpath in
-        projectRoot / "package.json")
-        |> Fpath.show
-      in
+      let manifestFile = Fpath.(projectRoot / "package.json") |> Fpath.show in
       Fs.readFile manifestFile
       |> P.then_ (fun manifest ->
              match Json.parse manifest with
@@ -319,11 +313,7 @@ end = struct
                else
                  None |> P.resolve)
     | file -> (
-      let manifestFile =
-        (let open Fpath in
-        projectRoot / file)
-        |> Fpath.show
-      in
+      let manifestFile = Fpath.(projectRoot / file) |> Fpath.show in
       match Path.extname file with
       | ".json" ->
         Fs.readFile manifestFile
